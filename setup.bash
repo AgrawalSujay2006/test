@@ -19,7 +19,7 @@
 set -e   # exit immediately on any error
 
 # ── CONFIG — UPDATE THESE BEFORE SUBMITTING ──────────────────
-REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git"
+REPO_URL="https://github.com/AgrawalSujay2006/test.git"
 REPO_DIR="gnr_map_project"
 ENV_NAME="gnr_project_env"
 PYTHON_VER="3.11"
