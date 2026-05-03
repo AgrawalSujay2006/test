@@ -2,25 +2,11 @@
 # =============================================================================
 # setup.bash — Run ONCE with internet to prepare everything
 # =============================================================================
-# What this does:
-#   1. Creates conda env  gnr_project_env  (Python 3.11)
-#   2. Installs all Python dependencies
-#   3. Clones the project repo
-#   4. Downloads InternVL2-8B weights  (primary VQA model)
-#   5. Downloads LLaVA-1.5-7B weights  (fallback VQA model)
-#   6. Patches model configs to remove auto_map so NO hub
-#      call is made at inference time (no internet = no hang)
-#   7. Writes TRANSFORMERS_OFFLINE=1 into the conda env's
-#      activate script so it is always set at inference time
-#
-# After this script finishes, everything works 100% OFFLINE.
-# =============================================================================
 
 set -e   # exit immediately on any error
 
 # ── CONFIG — UPDATE THESE BEFORE SUBMITTING ──────────────────
 REPO_URL="https://github.com/AgrawalSujay2006/test.git"
-REPO_DIR="gnr_map_project"
 ENV_NAME="gnr_project_env"
 PYTHON_VER="3.11"
 # ─────────────────────────────────────────────────────────────
@@ -67,16 +53,13 @@ pip install \
     huggingface_hub \
     bitsandbytes
 
-# ── 4. Clone project repo ─────────────────────────────────────
-echo "[setup] Cloning project repo..."
-cd ~
-if [ -d "$REPO_DIR" ]; then
-    echo "  Repo exists — pulling latest..."
-    cd "$REPO_DIR" && git pull
-else
-    git clone "$REPO_URL" "$REPO_DIR"
-    cd "$REPO_DIR"
-fi
+# ── 4. Clone project repo into CURRENT DIRECTORY ──────────────
+echo "[setup] Cloning project repo into current directory..."
+# We clone into a temp folder and move it so it doesn't crash 
+# if the current directory isn't perfectly empty.
+git clone "$REPO_URL" temp_repo
+cp -r temp_repo/* .
+rm -rf temp_repo
 
 # ── 5. Download InternVL2-8B ──────────────────────────────────
 echo "[setup] Downloading InternVL2-8B weights..."
@@ -100,8 +83,6 @@ else:
     print("  InternVL2-8B already present, skipping download.")
 
 # ── Patch configs to block any HuggingFace hub calls at runtime ──
-# auto_map tells transformers to fetch code from the hub — remove it
-# so the model loads purely from local files even with no internet.
 for fname in ["config.json", "tokenizer_config.json"]:
     fpath = os.path.join(model_dir, fname)
     if os.path.exists(fpath):
@@ -145,9 +126,6 @@ for fname in ["config.json", "tokenizer_config.json"]:
 PYEOF
 
 # ── 7. Bake TRANSFORMERS_OFFLINE into the conda env ──────────
-# These env vars are set automatically every time
-# "conda activate gnr_project_env" runs — including on the
-# grading machine where there is no internet.
 echo "[setup] Baking offline env vars into conda activate..."
 
 CONDA_BASE=$(conda info --base)
@@ -156,9 +134,6 @@ mkdir -p "$ACTIVATE_DIR"
 
 cat > "$ACTIVATE_DIR/set_offline.sh" <<'ENVEOF'
 #!/bin/bash
-# Block all HuggingFace hub network calls at inference time.
-# Set during setup while internet is available; enforced at
-# inference time when there is no internet.
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
@@ -170,8 +145,4 @@ echo "  Offline vars will auto-set on 'conda activate $ENV_NAME'."
 echo ""
 echo "============================================================"
 echo "  Setup complete!"
-echo ""
-echo "  Activate : conda activate $ENV_NAME"
-echo "  Inference: cd ~/$REPO_DIR"
-echo "             python inference.py --test_dir <absolute_path>"
 echo "============================================================"
