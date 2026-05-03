@@ -1,104 +1,66 @@
-# GNR Project — Geospatial Image Stitching & MCQ Answering
+GNR Project: Geospatial Image Stitching and MCQ Answering
 
-## Team Members
-- Roll: `YOUR_ROLL_1`
-- Roll: `YOUR_ROLL_2`
+Team Details
 
-## Project Overview
-This project reconstructs a large map from overlapping image patches and answers
-multiple-choice questions about the map using a local Vision-Language Model (VLM).
+    Student 1 Roll No: 23B2132  
+    Student 2 Roll No: 23B0023
+    Student 3 Roll No: 23B0733
 
-**No internet is required at inference time.**
+Project Overview
+This project provides an automated pipeline to reconstruct a large map from overlapping, shuffled, and rotated image patches. After reconstruction, it utilizes a local Vision-Language Model (VLM) to answer multiple-choice questions regarding spatial relationships and landmarks within the map.
 
----
+Pipeline Architecture
+    Image Stitching (stitcher.py):
 
-## Environment Setup
+        Primary Stage: SIFT feature detection and FLANN matching with RANSAC-based homography.  
 
-### Requirements
-- Linux (tested on Ubuntu 22.04)
-- CUDA 12.6 (L40s GPU with 48 GB VRAM)
-- Conda installed and available on PATH
+        Fallback Stage: A perimeter-proof jigsaw solver that minimizes Mean Absolute Difference (MAD) across overlapping regions,           ensuring a valid map is always generated even for textureless areas.  
 
-### One-time setup (internet required)
+VQA Inference (inference.py):
+    Uses InternVL2-8B as the primary engine.  
 
-```bash
+    Implements a tiling strategy to process high-resolution crops, ensuring small text labels are legible.  
+
+    Features a dynamic Dtype Safety check to ensure compatibility with 48GB L40s hardware in bfloat16 or quantized modes.
+
+Environment Setup
+The environment is initialized via the setup.bash script provided in the submission zip.
+
+One-time Setup (Internet Required)
 bash setup.bash
-```
 
-This will:
-1. Create the conda environment `gnr_project_env` with Python 3.11
-2. Install all Python dependencies (PyTorch, Transformers, OpenCV, etc.)
-3. Clone this repository
-4. Download InternVL2-8B model weights (~16 GB)
-5. Download LLaVA-1.5-7B model weights (~14 GB, fallback)
+This script performs the following actions:
+    Clones the repository and creates the gnr_project_env conda environment with Python 3.11.  
 
----
+    Installs torch (compatible with CUDA 12.6), transformers, and other required libraries.  
 
-## Running Inference (no internet needed)
+    Downloads the required model weights (InternVL2-8B) to the local models/ directory.  
 
-```bash
-conda activate gnr_project_env
-cd ~/gnr_map_project
-python inference.py --test_dir <absolute_path_to_test_dir>
-```
+    Patches configurations to ensure the system remains strictly offline during evaluation.
 
-This produces `submission.csv` in the current working directory.
+Running Inference (No Internet Required)
+    The inference script reads from a test directory containing a patches/ folder and a test.csv file
 
-### Expected test directory structure:
-```
-<test_dir>/
-├── patches/
-│   ├── patch_0.png      ← always top-left anchor
-│   ├── patch_1.png
-│   └── ...
-├── test.csv
-└── sample_submission.csv
-```
+      conda activate gnr_project_env
+      python inference.py --test_dir <absolute_path_to_test_dir>
 
----
+Output
+The script generates a submission.csv in the current working directory following the required format:  
+    id,question_num,option  
 
-## Pipeline
+    Option values: 1, 2, 3, 4 (Attempted) or 5 (Unanswered/Skip).
 
-### Step 1 — Image Stitching (`stitcher.py`)
-- **SIFT feature matching** (primary): Detects keypoints, matches them between
-  patches using FLANN, estimates homography with RANSAC, and warps patches into
-  an expanding canvas. Handles rotated patches automatically.
-- **Edge-similarity grid** (fallback): Places patches in a grid by minimising
-  mean-absolute-difference between touching edges. Tries all 4 rotations per patch.
-  Always produces output.
 
-### Step 2 — VQA (`inference.py`)
-- Loads **InternVL2-8B** (primary) or **LLaVA-1.5-7B** (fallback) — both run
-  fully offline.
-- Passes the stitched map image + MCQ prompt to the model.
-- Extracts digit answer (1–4) from model output; defaults to 5 (unanswered) if
-  no digit is found — avoiding hallucination penalty.
+Competition Compliance
+    Top-Left Anchor: The logic strictly respects patch_0.png as the coordinate anchor for the top-left corner.  
 
----
+    Hallucination Protection: Parsing logic is constrained to values 1–5; any uncertainty defaults to 5 to avoid hallucination           penalties.  
 
-## File Structure
+    Offline Execution: Environment variables are configured within the setup and inference scripts to prevent all network calls         during the evaluation stage.
 
-```
-gnr_map_project/
-├── inference.py          ← main entry point
-├── stitcher.py           ← image stitching logic
-├── setup.bash            ← environment setup (run with internet)
-├── README.md             ← this file
-└── models/
-    ├── InternVL2-8B/     ← downloaded by setup.bash
-    └── llava-1.5-7b-hf/  ← downloaded by setup.bash (fallback)
-```
+Citations
+    InternVL2: Chen, K., et al. (2024). InternVL: Scaling up Vision Foundation Models.  
 
----
+    LLaVA: Liu, H., et al. (2023). Visual Instruction Tuning.  
 
-## Notes
-- `patch_0.png` is always the top-left corner of the map (per competition spec).
-- All other patches may be shuffled and/or rotated by 0°, 90°, 180°, or 270°.
-- Submission format: `id,question_num,option` — options are 1–4, or 5 to skip.
-- Output value 5 = unanswered (0 points, no penalty).
-- Any value outside 1–5 = hallucinated (−1 point penalty) — our code never produces these.
-
-## Citations
-- InternVL2: Chen et al., "InternVL: Scaling up Vision Foundation Models" (2024)
-- LLaVA: Liu et al., "Visual Instruction Tuning" (NeurIPS 2023)
-- OpenCV: Bradski, G. (2000). The OpenCV Library.
+    OpenCV: Bradski, G. (2000). The OpenCV Library.
