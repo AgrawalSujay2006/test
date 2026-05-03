@@ -1,188 +1,253 @@
-import argparse, math, os, warnings
+"""
+stitcher.py — SIFT/FLANN Feature Stitcher + Perimeter-Proof Grid Fallback
+"""
+import argparse, cv2, os, math, warnings
 warnings.filterwarnings("ignore")
-import cv2, numpy as np
+import numpy as np
 from pathlib import Path
-from tqdm import tqdm
- 
- 
+
+# ── Rotation Helpers ─────────────────────────────────────────
+_ROT = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+def all_rotations(img):
+    yield 0, img
+    for deg, code in _ROT.items():
+        yield deg, cv2.rotate(img, code)
+
+# ── Patch Loading ────────────────────────────────────────────
 def load_patches(patches_dir):
     p = Path(patches_dir)
-    files = sorted(p.glob("patch_*.png"),
-                   key=lambda f: int(f.stem.split("_")[1]))
-    patches = []
-    for f in files:
-        idx = int(f.stem.split("_")[1])
-        img = cv2.imread(str(f))
-        if img is not None:
-            patches.append((idx, img))
-    print(f"[load] {len(patches)} patches loaded from {patches_dir}")
-    return patches
- 
- 
-def all_rotations(img):
-    yield 0,   img
-    yield 90,  cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    yield 180, cv2.rotate(img, cv2.ROTATE_180)
-    yield 270, cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
- 
- 
-def edge_diff(a, b, side, margin=10):
-    if side == "right":
-        ea = a[:, -margin:].astype(np.float32)
-        eb = b[:,  :margin].astype(np.float32)
-        if ea.shape[0] != eb.shape[0]: return 1e9
-    else:
-        ea = a[-margin:, :].astype(np.float32)
-        eb = b[ :margin, :].astype(np.float32)
-        if ea.shape[1] != eb.shape[1]: return 1e9
-    return float(np.mean(np.abs(ea - eb)))
- 
- 
-def sift_stitch(patches):
-    detector = cv2.SIFT_create(nfeatures=1000)
-    matcher  = cv2.FlannBasedMatcher(
-        {"algorithm": 1, "trees": 5}, {"checks": 50})
- 
-    def kp_des(img):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        return detector.detectAndCompute(gray, None)
- 
-    def good_matches(d1, d2):
-        if d1 is None or d2 is None or len(d1) < 4 or len(d2) < 4:
-            return []
-        try:
-            raw = matcher.knnMatch(d1, d2, k=2)
-        except cv2.error:
-            return []
-        return [m for pair in raw if len(pair) == 2
-                for m, n in [pair] if m.distance < 0.75 * n.distance]
- 
-    canvas    = patches[0][1].copy()
-    remaining = list(patches[1:])
-    placed    = 0
-    MAX_CANVAS = 25_000
- 
-    with tqdm(total=len(remaining), desc="  [sift] stitching") as pbar:
-        while remaining:
-            kp_c, des_c = kp_des(canvas)
-            best = {"score": -1, "list_idx": -1, "composite": None}
- 
-            for li, (_, patch_img) in enumerate(remaining):
-                for deg, rot_img in all_rotations(patch_img):
-                    kp_p, des_p = kp_des(rot_img)
-                    gm = good_matches(des_c, des_p)
-                    if len(gm) < 8: continue
-                    src = np.float32([kp_p[m.trainIdx].pt for m in gm]).reshape(-1,1,2)
-                    dst = np.float32([kp_c[m.queryIdx].pt for m in gm]).reshape(-1,1,2)
-                    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-                    if H is None: continue
-                    inliers = int(mask.sum())
-                    if inliers < 6: continue
-                    h_c, w_c = canvas.shape[:2]
-                    h_p, w_p = rot_img.shape[:2]
-                    corners  = np.float32([[0,0],[w_p,0],[w_p,h_p],[0,h_p]]).reshape(-1,1,2)
-                    wc = cv2.perspectiveTransform(corners, H)
-                    all_pts = np.concatenate([
-                        np.float32([[0,0],[w_c,0],[w_c,h_c],[0,h_c]]).reshape(-1,1,2), wc])
-                    x_min = int(np.floor(all_pts[:,0,0].min())) - 1
-                    y_min = int(np.floor(all_pts[:,0,1].min())) - 1
-                    x_max = int(np.ceil( all_pts[:,0,0].max())) + 1
-                    y_max = int(np.ceil( all_pts[:,0,1].max())) + 1
-                    cw, ch = x_max - x_min, y_max - y_min
-                    if cw > MAX_CANVAS or ch > MAX_CANVAS: continue
-                    shift  = np.array([[1,0,-x_min],[0,1,-y_min],[0,0,1]], dtype=np.float64)
-                    warped = cv2.warpPerspective(rot_img, shift @ H, (cw, ch))
-                    comp   = warped.copy()
-                    comp[-y_min:-y_min+h_c, -x_min:-x_min+w_c] = canvas
-                    if inliers > best["score"]:
-                        best = {"score": inliers, "list_idx": li, "composite": comp}
- 
-            if best["composite"] is not None:
-                canvas = best["composite"]
-                remaining.pop(best["list_idx"])
-                placed += 1
-            else:
-                remaining.pop(0)
-            pbar.update(1)
- 
-    print(f"  [sift] Placed {placed}/{len(patches)-1} patches "
-          f"-> {canvas.shape[1]}x{canvas.shape[0]} px")
-    return canvas
- 
- 
-def grid_stitch(patches):
-    n = len(patches)
-    patch_h, patch_w = patches[0][1].shape[:2]
-    cols = max(1, round(math.sqrt(n * patch_w / patch_h)))
-    rows = math.ceil(n / cols)
-    print(f"  [grid] {rows} rows x {cols} cols  (patch {patch_w}x{patch_h} px)")
- 
-    remaining  = {idx: img for idx, img in patches[1:]}
-    grid       = [[None]*cols for _ in range(rows)]
-    grid[0][0] = patches[0][1]
- 
-    for r in range(rows):
-        for c in range(cols):
-            if r == 0 and c == 0: continue
-            if not remaining: break
-            left  = grid[r][c-1] if c > 0 else None
-            above = grid[r-1][c] if r > 0 else None
-            best_idx = None; best_img = None; best_score = 1e9
-            for idx, img in remaining.items():
-                for deg, rot_img in all_rotations(img):
-                    s = 0.0; cnt = 0
-                    if left  is not None: s += edge_diff(left,  rot_img, "right");  cnt += 1
-                    if above is not None: s += edge_diff(above, rot_img, "bottom"); cnt += 1
-                    s = s / cnt if cnt else 0.0
-                    if s < best_score:
-                        best_score = s; best_idx = idx; best_img = rot_img
-            if best_idx is not None:
-                grid[r][c] = best_img; del remaining[best_idx]
- 
-    canvas = np.zeros((rows*patch_h, cols*patch_w, 3), dtype=np.uint8)
-    for r in range(rows):
-        for c in range(cols):
-            if grid[r][c] is not None:
-                canvas[r*patch_h:(r+1)*patch_h,
-                       c*patch_w:(c+1)*patch_w] = grid[r][c]
-    print(f"  [grid] Canvas: {canvas.shape[1]}x{canvas.shape[0]} px")
-    return canvas
- 
- 
-def stitch(patches_dir, output_path="stitched_map.png", strategy="auto"):
-    if os.path.exists(output_path):
-        cached = cv2.imread(output_path)
-        if cached is not None:
-            print(f"[stitch] Loaded cached map: {output_path}")
-            return cached
- 
-    patches = load_patches(patches_dir)
-    if not patches:
-        raise RuntimeError(f"No patches found in {patches_dir}")
- 
-    result = None
-    if strategy in ("auto", "sift"):
-        print("[stitch] Trying SIFT...")
-        try:
-            result = sift_stitch(patches)
-        except Exception as e:
-            print(f"  [sift] Failed: {e}"); result = None
- 
-    if result is None:
-        print("[stitch] Using grid fallback...")
-        result = grid_stitch(patches)
- 
-    cv2.imwrite(output_path, result)
-    print(f"[stitch] Saved -> {output_path}  ({result.shape[1]}x{result.shape[0]} px)")
+    files = sorted(p.glob("patch_*.png"), key=lambda f: int(f.stem.split("_")[1]))
+    patches = {int(f.stem.split("_")[1]): cv2.imread(str(f)) for f in files}
+    if not patches: raise RuntimeError(f"No patch_*.png found in {patches_dir}")
+    ph, pw = next(iter(patches.values())).shape[:2]
+    return patches, pw, ph
+
+# ============================================================
+# 1. PRIMARY PIPELINE: SIFT FEATURE MATCHING
+# ============================================================
+def warp_two_images(img1, img2, H):
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+    
+    pts1 = np.float32([[0,0],[0,h1],[w1,h1],[w1,0]]).reshape(-1,1,2)
+    pts2 = np.float32([[0,0],[0,h2],[w2,h2],[w2,0]]).reshape(-1,1,2)
+    pts2_ = cv2.perspectiveTransform(pts2, H)
+    pts = np.concatenate((pts1, pts2_), axis=0)
+    
+    [xmin, ymin] = np.int32(pts.min(axis=0).ravel() - 0.5)
+    [xmax, ymax] = np.int32(pts.max(axis=0).ravel() + 0.5)
+    t = [-xmin, -ymin]
+    
+    Ht = np.array([[1,0,t[0]],[0,1,t[1]],[0,0,1]])
+    result = cv2.warpPerspective(img2, Ht.dot(H), (xmax-xmin, ymax-ymin))
+    result[t[1]:h1+t[1], t[0]:w1+t[0]] = img1
     return result
- 
- 
+
+def stitch_sift(patches):
+    print("[SIFT] Starting feature matching pipeline...")
+    sift = cv2.SIFT_create()
+    flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+    
+    canvas = patches[0]
+    remaining = {k: v for k, v in patches.items() if k != 0}
+    MIN_MATCH_COUNT = 15
+    
+    while remaining:
+        kp_canvas, des_canvas = sift.detectAndCompute(canvas, None)
+        if des_canvas is None: return None
+            
+        best_matches, best_k, best_H, best_rot_img = [], None, None, None
+        
+        for k, img in remaining.items():
+            for deg, rot_img in all_rotations(img):
+                kp_img, des_img = sift.detectAndCompute(rot_img, None)
+                if des_img is None or len(kp_img) < MIN_MATCH_COUNT: continue
+                    
+                matches = flann.knnMatch(des_img, des_canvas, k=2)
+                good = [m for m, n in matches if m.distance < 0.7 * n.distance]
+                
+                if len(good) > MIN_MATCH_COUNT and len(good) > len(best_matches):
+                    src_pts = np.float32([kp_img[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                    dst_pts = np.float32([kp_canvas[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                    H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                    if H is not None:
+                        best_matches, best_k, best_H, best_rot_img = good, k, H, rot_img
+                        
+        if best_k is not None:
+            print(f"[SIFT] Matched patch_{best_k} ({len(best_matches)} inliers). Warping to canvas...")
+            canvas = warp_two_images(canvas, best_rot_img, best_H)
+            del remaining[best_k]
+        else:
+            print(f"[SIFT] Could not find enough matches for remaining {len(remaining)} patches.")
+            print("[SIFT] FAILED. Triggering fallback.")
+            return None
+            
+    print("[SIFT] SUCCESS: All patches stitched via feature matching.")
+    return canvas
+
+# ============================================================
+# 2. FALLBACK PIPELINE: GRID EDGE-SIMILARITY
+# ============================================================
+def edge_diff_overlap(ref, cand, side, overlap=0.20):
+    h, w = ref.shape[:2]
+    ox, oy = max(1, int(w * overlap)), max(1, int(h * overlap))
+    
+    if side == "right":
+        if ref.shape[0] != cand.shape[0]: return float('inf')
+        ea, eb = ref[:, -ox:].astype(np.float32), cand[:, :ox].astype(np.float32)
+    else: 
+        if ref.shape[1] != cand.shape[1]: return float('inf')
+        ea, eb = ref[-oy:, :].astype(np.float32), cand[:oy, :].astype(np.float32)
+        
+    return float(np.mean(np.abs(ea - eb)))
+
+def evaluate_completed_grid(grid, overlap=0.20):
+    """Calculates the TRUE average error across all internal edges."""
+    total_err = 0.0
+    edge_count = 0
+    rows, cols = len(grid), len(grid[0])
+    
+    for r in range(rows):
+        for c in range(cols):
+            if c < cols - 1:
+                total_err += edge_diff_overlap(grid[r][c], grid[r][c+1], "right", overlap)
+                edge_count += 1
+            if r < rows - 1:
+                total_err += edge_diff_overlap(grid[r][c], grid[r+1][c], "bottom", overlap)
+                edge_count += 1
+                
+    return total_err / max(edge_count, 1)
+
+def attempt_grid_jigsaw(patches, rows, cols, overlap=0.20):
+    n = len(patches)
+    if rows * cols != n: return None, float('inf')
+
+    grid = [[None] * cols for _ in range(rows)]
+    grid[0][0] = patches[0]
+    remaining = {k: v for k, v in patches.items() if k != 0}
+    placed_cells = {(0, 0)}
+
+    while remaining:
+        frontier_neighbors = {}
+        for r in range(rows):
+            for c in range(cols):
+                if (r, c) not in placed_cells:
+                    neighbors = sum(1 for nr, nc in [(r-1, c), (r+1, c), (r, c-1), (r, c+1)] 
+                                    if (nr, nc) in placed_cells)
+                    if neighbors > 0: frontier_neighbors[(r, c)] = neighbors
+        
+        if not frontier_neighbors: break
+        
+        max_n = max(frontier_neighbors.values())
+        best_frontiers = [(r, c) for (r, c), count in frontier_neighbors.items() if count == max_n]
+
+        global_best_match = None
+        global_max_conf = -1.0
+
+        for fr, fc in best_frontiers:
+            matches = []
+            for k, img in remaining.items():
+                for deg, rot in all_rotations(img):
+                    score, valid = 0.0, True
+                    
+                    if fr > 0 and (fr-1, fc) in placed_cells:
+                        d = edge_diff_overlap(grid[fr-1][fc], rot, "bottom", overlap)
+                        if d == float('inf'): valid = False
+                        else: score += d
+                    if valid and fr < rows-1 and (fr+1, fc) in placed_cells:
+                        d = edge_diff_overlap(rot, grid[fr+1][fc], "bottom", overlap)
+                        if d == float('inf'): valid = False
+                        else: score += d
+                    if valid and fc > 0 and (fr, fc-1) in placed_cells:
+                        d = edge_diff_overlap(grid[fr][fc-1], rot, "right", overlap)
+                        if d == float('inf'): valid = False
+                        else: score += d
+                    if valid and fc < cols-1 and (fr, fc+1) in placed_cells:
+                        d = edge_diff_overlap(rot, grid[fr][fc+1], "right", overlap)
+                        if d == float('inf'): valid = False
+                        else: score += d
+                        
+                    if valid: matches.append((score / max_n, k, rot))
+
+            if not matches: continue
+            
+            matches.sort(key=lambda x: x[0])
+            best_err, best_k, best_rot = matches[0]
+            conf = matches[1][0] - best_err if len(matches) > 1 else float('inf')
+
+            if conf > global_max_conf:
+                global_max_conf = conf
+                global_best_match = (fr, fc, best_k, best_rot)
+
+        if global_best_match is None: return None, float('inf')
+
+        fr, fc, k, rot = global_best_match
+        grid[fr][fc] = rot
+        placed_cells.add((fr, fc))
+        del remaining[k]
+
+    true_error = evaluate_completed_grid(grid, overlap)
+    ph, pw = patches[0].shape[:2]
+    stride_y = int(ph * (1 - overlap))
+    stride_x = int(pw * (1 - overlap))
+    
+    canvas_h = ph + (rows - 1) * stride_y
+    canvas_w = pw + (cols - 1) * stride_x
+    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    
+    for r in range(rows):
+        for c in range(cols):
+            tile = grid[r][c]
+            canvas[r*stride_y : r*stride_y+ph, c*stride_x : c*stride_x+pw] = tile
+
+    return canvas, true_error
+
+def stitch(patches_dir, output_path="stitched_map.png", force=False):
+    if not force and os.path.exists(output_path):
+        img = cv2.imread(output_path)
+        if img is not None: return img
+
+    patches, pw, ph = load_patches(patches_dir)
+    n = len(patches)
+    
+    canvas = stitch_sift(patches)
+    if canvas is not None:
+        cv2.imwrite(output_path, canvas)
+        return canvas
+        
+    print("[FALLBACK] Executing Edge-Similarity Jigsaw Grid...")
+    factorizations = [(i, n // i) for i in range(1, n + 1) if n % i == 0]
+    valid_factorizations = []
+    overlap = 0.20
+    stride_y = int(ph * (1 - overlap))
+    stride_x = int(pw * (1 - overlap))
+    
+    for rows, cols in factorizations:
+        if rows == 1 or cols == 1: continue
+        canvas_h = ph + (rows - 1) * stride_y
+        canvas_w = pw + (cols - 1) * stride_x
+        aspect_ratio = canvas_w / canvas_h
+        if 0.2 <= aspect_ratio <= 5.0:
+            valid_factorizations.append((rows, cols))
+
+    best_canvas, best_score, best_dims = None, float('inf'), None
+    for rows, cols in valid_factorizations:
+        print(f"  [FALLBACK] Testing {rows}r x {cols}c grid...", end=" ")
+        grid_canvas, avg_diff = attempt_grid_jigsaw(patches, rows, cols, overlap=overlap)
+        if grid_canvas is not None:
+            print(f"true_error={avg_diff:.2f}")
+            if avg_diff < best_score:
+                best_score, best_canvas, best_dims = avg_diff, grid_canvas, (rows, cols)
+        else: print("failed")
+
+    if best_canvas is None: best_canvas = patches[0]
+    cv2.imwrite(output_path, best_canvas)
+    return best_canvas
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--patches_dir", default="patches")
-    ap.add_argument("--output",      default="stitched_map.png")
-    ap.add_argument("--strategy",    default="auto",
-                    choices=["auto", "sift", "grid"])
+    ap.add_argument("--patches_dir", default="test_patches")
+    ap.add_argument("--output", default="stitched_map.png")
+    ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
-    r = stitch(args.patches_dir, args.output, args.strategy)
-    print(f"Done. {r.shape[1]}x{r.shape[0]} px")
+    stitch(args.patches_dir, args.output, force=args.force)
