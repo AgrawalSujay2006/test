@@ -1,0 +1,26 @@
+# GNR Map Project — Python dependencies
+# Matches the pip install commands in setup.bash exactly.
+# PyTorch is installed separately in setup.bash with the cu121 index URL
+# because pip install from requirements.txt cannot specify --index-url
+# per-package. Install order:
+#   1. pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 \
+#          --index-url https://download.pytorch.org/whl/cu121
+#   2. pip install -r requirements.txt
+
+torch==2.3.0
+torchvision==0.18.0
+torchaudio==2.3.0
+transformers==4.43.4
+accelerate==0.33.0
+sentencepiece
+einops
+timm
+Pillow
+opencv-python-headless
+numpy
+pandas
+tqdm
+scipy
+scikit-image
+huggingface_hub
+bitsandbytes
